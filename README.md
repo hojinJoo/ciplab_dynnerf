@@ -8,6 +8,21 @@
 > [Chen Gao](http://chengao.vision), [Ayush Saraf](#), [Johannes Kopf](https://johanneskopf.de/), [Jia-Bin Huang](https://filebox.ece.vt.edu/~jbhuang/) <br>
 in ICCV 2021 <br>
 
+## Code Changed
+
+* radianceVariation.py : 기존 run_nerf.py 코드 수정
+* run_nerf_re.py : 기존 render_utils.py 코드 수정
+
+### 아래 참고해서 config, logs, weights 다운 받아야함
+
+run command
+```
+python radianceVariation.py --config configs/config_Balloon2.txt --render_only --ft_path $ROOT_PATH/logs/Balloon2_H270_DyNeRF_pretrain/300000.tar
+
+```
+
+
+
 ## Setup
 The code is test with
 * Linux (tested on CentOS Linux release 7.4.1708)

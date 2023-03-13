@@ -43,7 +43,6 @@ def load_colmap_data(realdir):
         t = im.tvec.reshape([3,1])
         m = np.concatenate([np.concatenate([R, t], 1), bottom], 0)
         w2c_mats.append(m)
-
         pts_3d_idx = im.point3D_ids
         pts_3d_vis_idx = pts_3d_idx[pts_3d_idx >= 0]
 

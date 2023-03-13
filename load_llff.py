@@ -64,6 +64,9 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     bds = poses_arr[:, -2:].transpose([1,0])
+    # (12, 17) 이미지 개수 17
+    # (3, 5, 12) 15
+    # (2, 12) 2
 
     img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
             if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
@@ -103,8 +106,8 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
         print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
         return
 
-    sh = imageio.imread(imgfiles[0]).shape
-    num_img = len(imgfiles)
+    sh = imageio.imread(imgfiles[0]).shape # 270 480 3    
+    num_img = len(imgfiles) # 12
     poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
     poses[2, 4, :] = poses[2, 4, :] * 1./factor
 
@@ -320,7 +323,6 @@ def load_llff_data(args, basedir,
 
     poses, bds, imgs, disp, masks, flows_f, flow_masks_f, flows_b, flow_masks_b = \
         _load_data(basedir, factor=factor) # factor=2 downsamples original imgs by 2x
-
     print('Loaded', basedir, bds.min(), bds.max())
 
     # Correct rotation matrix ordering and move variable dim to axis 0
@@ -340,26 +342,22 @@ def load_llff_data(args, basedir,
     # Rescale if bd_factor is provided
     sc = 1. if bd_factor is None else 1./(np.percentile(bds[:, 0], 5) * bd_factor)
 
-    poses[:, :3, 3] *= sc
+    poses[:, :3, 3] *= sc # 12 3 5
     bds *= sc
-
     if recenter:
         poses = recenter_poses(poses)
 
     # Only for rendering
     if frame2dolly == -1:
-        c2w = poses_avg(poses)
+        c2w = poses_avg(poses) # 3, 5
     else:
         c2w = poses[frame2dolly, :, :]
-
+        
     H, W, _ = c2w[:, -1]
-
     # Generate poses for novel views
     render_poses, render_focals = generate_path(c2w, args)
     render_poses = np.array(render_poses).astype(np.float32)
-
     grids = get_grid(int(H), int(W), len(poses), flows_f, flow_masks_f, flows_b, flow_masks_b) # [N, H, W, 8]
-
     return images, disp, masks, poses, bds,\
         render_poses, render_focals, grids
 
@@ -389,7 +387,7 @@ def generate_path(c2w, args):
         i_pose = np.linalg.inv(i_pose)
 
         ref_pose = np.concatenate([c2w[:3, :4], np.array([0.0, 0.0, 0.0, 1.0])[np.newaxis, :]], axis=0)
-
+        
         render_pose = np.dot(ref_pose, i_pose)
         output_poses.append(np.concatenate([render_pose[:3, :], hwf], 1))
         output_focals.append(focal)

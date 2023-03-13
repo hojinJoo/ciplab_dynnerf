@@ -8,6 +8,10 @@ import torch.nn.functional as F
 from run_nerf_helpers import *
 from utils.flow_utils import flow_to_image
 
+import matplotlib.pyplot as plt
+
+
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -22,7 +26,6 @@ def batchify_rays(t, chain_5frames,
             if k not in all_ret:
                 all_ret[k] = []
             all_ret[k].append(ret[k])
-
     all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
 
@@ -67,6 +70,7 @@ def render(t, chain_5frames,
         # use provided ray batch
         rays_o, rays_d = rays
 
+
     if use_viewdirs:
         # provide ray directions as input
         viewdirs = rays_d
@@ -82,6 +86,7 @@ def render(t, chain_5frames,
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, focal, 1., rays_o, rays_d)
 
+
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1, 3]).float()
     rays_d = torch.reshape(rays_d, [-1, 3]).float()
@@ -96,9 +101,12 @@ def render(t, chain_5frames,
     # Render and reshape
     all_ret = batchify_rays(t, chain_5frames,
                         rays, chunk, **kwargs)
+    
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
+
+
 
     return all_ret
 
@@ -187,6 +195,268 @@ def render_path_batch(render_poses, time2render,
     return ret_dict
 
 
+def make_maps(render_poses,
+                time2render,
+                hwf,
+                chunk,
+                render_kwargs,
+                savedir=None,
+                flows_gt_f=None,
+                flows_gt_b=None,
+                focal2render=None):
+    H, W, focal = hwf
+
+    ret_dict = {}
+    rgbs = []
+    rgbs_d = []
+    rgbs_s = []
+    depths = []
+    depths_d = []
+    depths_s = []
+    flows_f = []
+    flows_b = []
+    dynamicness = []
+    blending = []
+
+    grid = np.stack(np.meshgrid(np.arange(W, dtype=np.float32),
+                       np.arange(H, dtype=np.float32), indexing='xy'), -1)
+    grid = torch.Tensor(grid)
+    time_curr = time.time()
+    for i, c2w in enumerate(render_poses):
+        t = time2render[i]
+        pose = c2w[:3, :4]
+        print(i, time.time() - time_curr)
+        time_curr = time.time()
+
+        if focal2render is None:
+            print(render_kwargs["network_query_fn_d"])
+            #ray 얻어내기
+            rays_o, rays_d = get_rays(H,W,focal,pose)
+            
+            #get viewdirection
+            viewdirs = rays_d
+            viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
+            viewdirs = torch.reshape(viewdirs, [-1, 3]).float()
+            
+            sh = rays_d.shape
+
+            #NDC space
+            rays_o, rays_d = ndc_rays(H, W, focal, 1., rays_o, rays_d)
+
+            # Create ray batch
+            rays_o = torch.reshape(rays_o, [-1, 3]).float()
+            rays_d = torch.reshape(rays_d, [-1, 3]).float()
+            near =0.
+            far =1.
+            near, far = near * \
+            torch.ones_like(rays_d[..., :1]), far * torch.ones_like(rays_d[..., :1])
+
+            t_vals = torch.linspace(0., 1., steps=64)
+            z_vals = near * (1.-t_vals) + far * (t_vals)
+            z_vals = z_vals.expand([480*270, 64]) # N_rays N_samples
+
+
+            pts = rays_o[..., None, :] + rays_d[..., None, :] * \
+                    z_vals[..., :, None] # [N_rays, N_samples, 3]
+
+            # Add the time dimension to xyz.
+            pts_ref = torch.cat([pts, torch.ones_like(pts[..., 0:1]) * t], -1)
+            
+            print(f"FIRST {viewdirs.shape}")
+            print(f"pts {pts_ref[..., :3].shape}")
+            # First pass: we have the staticNeRF results
+            raw_s = render_kwargs["network_query_fn_s"](pts_ref[..., :3], viewdirs, render_kwargs["network_fn_s"])
+            # raw_s:          [N_rays, N_samples, 5]
+            # raw_s_rgb:      [N_rays, N_samples, 0:3]
+            # raw_s_a:        [N_rays, N_samples, 3:4]
+            # raw_s_blending: [N_rays, N_samples, 4:5]
+
+            # Second pass: we have the DyanmicNeRF results and the blending weight
+            raw_d = render_kwargs["network_query_fn_d"](pts_ref, viewdirs, render_kwargs["network_fn_d"])
+            # raw_d:          [N_rays, N_samples, 11]
+            # raw_d_rgb:      [N_rays, N_samples, 0:3]
+            # raw_d_a:        [N_rays, N_samples, 3:4]
+            # sceneflow_b:    [N_rays, N_samples, 4:7]
+            # sceneflow_f:    [N_rays, N_samples, 7:10]
+            # raw_d_blending: [N_rays, N_samples, 10:11]
+
+
+            raw_s_rgba = raw_s[..., :4]
+            raw_d_rgba = raw_d[..., :4]
+
+            # We need the sceneflow from the dynamicNeRF.
+            sceneflow_b = raw_d[..., 4:7]
+            sceneflow_f = raw_d[..., 7:10]
+
+            blending = raw_d[..., 10]
+            
+            
+        
+
+            # if sfmask:
+            #     sceneflow_f = sceneflow_f * blending.detach()[..., None]
+            #     sceneflow_b = sceneflow_b * blending.detach()[..., None]
+
+            # Rerndering.
+            rgb_map_full, depth_map_full, acc_map_full, weights_full, \
+            rgb_map_s, depth_map_s, acc_map_s, weights_s, \
+            rgb_map_d, depth_map_d, acc_map_d, weights_d, \
+            dynamicness_map, new_z, ind = raw2outputs(raw_s_rgba,
+                                        raw_d_rgba,
+                                        blending,
+                                        z_vals,
+                                        rays_d,
+                                        render_kwargs["raw_noise_std"])
+
+
+            
+            
+            out_size = 256
+            
+            Wid = 350
+            Hei = 139
+
+            ind_num = Hei*480+ Wid
+            
+            #2001
+            #rays_o : raysnum, 3
+            
+            # IMGUI
+            #print(depth_map_full.shape)
+            #temp = torch.argmax(depth_map_full)
+            temp_o = rays_o[ind_num]
+            temp_d = rays_d[ind_num]
+            #temp_z = depth_map_full[ind_num]
+            temp_z = new_z[ind_num][ind[ind_num]]
+
+            temp_val = temp_o + temp_z*temp_d
+            temp_val = torch.unsqueeze(temp_val,0)
+            temp_val = torch.unsqueeze(temp_val,0)
+            temp_val = torch.cat([temp_val, torch.ones_like(temp_val[..., 0:1]) * t], -1)
+            
+            #rayd 에 수직인 평면에 돌리기
+            
+            
+                
+                
+            
+            def get_views(view_dir) :
+                out_size = 32
+                
+                # view_x, view_y = torch.meshgrid(torch.linspace(-1, 1, out_size),torch.linspace(-1, 1, out_size))
+
+                # view_x = torch.reshape(view_x, [-1, 1])
+                # view_y = torch.reshape(view_y, [-1, 1])
+                # view_z = torch.ones_like(view_x)
+                # # view_z = torch.reshape(view_z, [-1, 1])
+                
+                view_x, view_y,view_z = torch.meshgrid(torch.linspace(-1, 1, out_size),torch.linspace(-1, 1, out_size),torch.linspace(-1, 1, out_size))
+
+                view_x = torch.reshape(view_x, [-1, 1])
+                view_y = torch.reshape(view_y, [-1, 1])
+                view_z = torch.reshape(view_z, [-1, 1])
+
+                viewdirs = torch.cat((view_z,view_y,view_x),dim=-1)
+                
+                viewdirs = torch.div(viewdirs, torch.norm(viewdirs, dim=-1, keepdim=True))
+                angle = torch.acos(torch.sum(view_dir*viewdirs, dim=-1, keepdim=True)).squeeze()
+                viewdirs = viewdirs[angle<=90/180*np.pi]
+                
+                
+                return viewdirs
+            
+            new_view_dirs = get_views(viewdirs[ind_num])
+            
+            new_w,new_h = 128,128
+            
+            
+            # new_view_dirs = get_all_view_dirs_to_temp_val_and_normalize(temp_val, out_size)
+            # print(f"new view dirs {new_view_dirs.shape}")
+            # # input(new_view_dirs.shape)
+            # # 배치화
+            
+            
+            
+            def get_rgb_full(s,d,b) :
+                return (d*b + s*(1-b)).to(torch.device("cuda:1"))
+            
+            # mGPU
+            temp_val = temp_val.repeat(new_w*new_h,1,1)
+         
+        
+            raw_s_new = render_kwargs["network_query_fn_s"](temp_val[...,:3],new_view_dirs,render_kwargs["network_fn_s"])
+            raw_d_new = render_kwargs["network_query_fn_d"](temp_val,new_view_dirs,render_kwargs["network_fn_d"])    
+            blending_new = raw_d_new[...,10]
+            rgb_d = torch.sigmoid(raw_d_new[..., :3])  # [N_rays, N_samples, 3]
+            rgb_s = torch.sigmoid(raw_s_new[..., :3])  # [N_rays, N_samples, 3]
+            
+            # rgb full to be multi-gpu            
+            rgb_full = get_rgb_full(rgb_s,rgb_d,blending_new)
+            # rgb_full = rgb_d*blending_new+rgb_s*(1-blending_new)
+            rgb_full = rgb_full.squeeze(0).squeeze(0)    
+            
+            import matplotlib.pyplot as plt
+            color = color.reshape((new_w,new_h,3))
+            plt.imsave('out.png',rgb_full.cpu().numpy())
+            
+            return 
+            
+            # # 여기까지
+            # #여기부터
+            # color = torch.zeros((new_w*new_h,3))
+            # color_i = 0
+            # for d in new_view_dirs : 
+                
+            
+            
+            #     print(color_i)
+            
+            #     # below codes to multi-gpu
+            # # new_view_dirs = nn.DataParallel(new_view_dirs)
+            # # print(new_view_dirs.device_ids)
+            # # temp_val = nn.DataParallel(temp_val)
+            # # render_kwargs["network_query_fn_s"] = nn.DataParallel(render_kwargs["network_query_fn_s"])
+            # # render_kwargs["network_query_fn_d"] = nn.DataParallel(render_kwargs["network_query_fn_d"])
+            #     d = d.unsqueeze(0)
+            #     raw_s_new = render_kwargs["network_query_fn_s"](temp_val[...,:3],d,render_kwargs["network_fn_s"])
+            #     raw_d_new = render_kwargs["network_query_fn_d"](temp_val,d,render_kwargs["network_fn_d"])    
+            #     blending_new = raw_d_new[...,10]
+            #     rgb_d = torch.sigmoid(raw_d_new[..., :3])  # [N_rays, N_samples, 3]
+            #     rgb_s = torch.sigmoid(raw_s_new[..., :3])  # [N_rays, N_samples, 3]
+
+            #     rgb_full = rgb_d*blending_new+rgb_s*(1-blending_new)
+            #     rgb_full = rgb_full.squeeze(0).squeeze(0)    
+            #     color[color_i] = rgb_full
+            #     color_i +=1
+            # import matplotlib.pyplot as plt
+            # color = color.reshape((new_w,new_h,3))
+            # plt.imsave('out.png',color.cpu().numpy())
+            
+            # return 
+        
+        
+            # # 여기까지
+            
+            
+            raw_s_new = render_kwargs["network_query_fn_s"](temp_val[...,:3],new_view_dirs,render_kwargs["network_fn_s"])
+            raw_d_new = render_kwargs["network_query_fn_d"](temp_val,new_view_dirs,render_kwargs["network_fn_d"])
+            blending_new = raw_d_new[...,10]
+            rgb_d = torch.sigmoid(raw_d_new[..., :3])  # [N_rays, N_samples, 3]
+            rgb_s = torch.sigmoid(raw_s_new[..., :3])  # [N_rays, N_samples, 3]
+            input(rgb_s.size())
+            rgb_full = rgb_d*blending_new+rgb_s*(1-blending_new)
+            rgb_full = rgb_full.squeeze(0).squeeze(0)
+            input(rgb_full.shape)
+            import matplotlib.pyplot as plt
+            color = color.reshape((new_w,new_h,3))
+            plt.imsave('out.png',rgb_full.cpu().numpy())
+            return
+            #rgb_full 값 이용
+            # print(rgb_full)
+            print(rgb_map_full[ind_num])
+            #여기까지
+
+
 def render_path(render_poses,
                 time2render,
                 hwf,
@@ -215,7 +485,7 @@ def render_path(render_poses,
     ret_dict = {}
     rgbs = []
     rgbs_d = []
-    rgbs_s = []
+    rgb_s = []
     depths = []
     depths_d = []
     depths_s = []
@@ -238,22 +508,23 @@ def render_path(render_poses,
             # Normal rendering.
             ret = render(t, False,
                          H, W, focal,
-                         chunk=1024*32, c2w=pose,
+                         chunk=480*270, c2w=pose,
                          **render_kwargs)
         else:
             # Render image using different focal length.
             ret = render(t, False,
                          H, W, focal, focal_render=focal2render[i],
-                         chunk=1024*32, c2w=pose,
+                         chunk=480*270, c2w=pose,
                          **render_kwargs)
 
         rgbs.append(ret['rgb_map_full'].cpu().numpy())
         rgbs_d.append(ret['rgb_map_d'].cpu().numpy())
-        rgbs_s.append(ret['rgb_map_s'].cpu().numpy())
+        rgb_s.append(ret['rgb_map_s'].cpu().numpy())
 
         depths.append(ret['depth_map_full'].cpu().numpy())
         depths_d.append(ret['depth_map_d'].cpu().numpy())
         depths_s.append(ret['depth_map_s'].cpu().numpy())
+        
 
         dynamicness.append(ret['dynamicness_map'].cpu().numpy())
 
@@ -306,9 +577,10 @@ def render_path(render_poses,
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
+
     ret_dict['rgbs'] = np.stack(rgbs, 0)
     ret_dict['rgbs_d'] = np.stack(rgbs_d, 0)
-    ret_dict['rgbs_s'] = np.stack(rgbs_s, 0)
+    ret_dict['rgb_s'] = np.stack(rgb_s, 0)
     ret_dict['depths'] = np.stack(depths, 0)
     ret_dict['depths_d'] = np.stack(depths_d, 0)
     ret_dict['depths_s'] = np.stack(depths_s, 0)
@@ -385,6 +657,7 @@ def raw2outputs(raw_s,
     weights_d = alpha_d * T_d
     weights_s = alpha_s * T_s
     weights_full = (alpha_d * blending + alpha_s * (1. - blending)) * T_full
+
     # weights_full = alphas * T_full
 
     # Computed weighted color of each sample along each ray.
@@ -398,6 +671,10 @@ def raw2outputs(raw_s,
     depth_map_d = torch.sum(weights_d * z_vals, -1)
     depth_map_s = torch.sum(weights_s * z_vals, -1)
     depth_map_full = torch.sum(weights_full * z_vals, -1)
+    
+    temp = weights_full.max(dim=1)
+    ind = temp.indices
+    
 
     # Sum of weights along each ray. This value is in [0, 1] up to numerical error.
     acc_map_d = torch.sum(weights_d, -1)
@@ -410,7 +687,7 @@ def raw2outputs(raw_s,
 
     return rgb_map_full, depth_map_full, acc_map_full, weights_full, \
            rgb_map_s, depth_map_s, acc_map_s, weights_s, \
-           rgb_map_d, depth_map_d, acc_map_d, weights_d, dynamicness_map
+           rgb_map_d, depth_map_d, acc_map_d, weights_d, dynamicness_map, z_vals, ind
 
 
 def raw2outputs_d(raw_d,
@@ -547,13 +824,15 @@ def render_rays(t,
         t_rand = torch.rand(z_vals.shape)
         z_vals = lower + (upper - lower) * t_rand
 
+
     # Points in space to evaluate model at.
     pts = rays_o[..., None, :] + rays_d[..., None, :] * \
         z_vals[..., :, None] # [N_rays, N_samples, 3]
 
     # Add the time dimension to xyz.
     pts_ref = torch.cat([pts, torch.ones_like(pts[..., 0:1]) * t], -1)
-    input(viewdirs.shape)
+    
+
     # First pass: we have the staticNeRF results
     raw_s = network_query_fn_s(pts_ref[..., :3], viewdirs, network_fn_s)
     # raw_s:          [N_rays, N_samples, 5]
@@ -577,7 +856,6 @@ def render_rays(t,
                                      raw_noise_std)
         ret = {'rgb_map_s': rgb_map_s}
         return ret
-
     raw_s_rgba = raw_s[..., :4]
     raw_d_rgba = raw_d[..., :4]
 
@@ -598,7 +876,7 @@ def render_rays(t,
     rgb_map_full, depth_map_full, acc_map_full, weights_full, \
     rgb_map_s, depth_map_s, acc_map_s, weights_s, \
     rgb_map_d, depth_map_d, acc_map_d, weights_d, \
-    dynamicness_map = raw2outputs(raw_s_rgba,
+    dynamicness_map, new_z, ind = raw2outputs(raw_s_rgba,
                                   raw_d_rgba,
                                   blending,
                                   z_vals,
@@ -609,6 +887,64 @@ def render_rays(t,
            'rgb_map_s': rgb_map_s, 'depth_map_s': depth_map_s, 'acc_map_s': acc_map_s, 'weights_s': weights_s,
            'rgb_map_d': rgb_map_d, 'depth_map_d': depth_map_d, 'acc_map_d': acc_map_d, 'weights_d': weights_d,
            'dynamicness_map': dynamicness_map}
+
+    #여기서부터
+
+    """Wid = 0
+    print("start")
+    for k in range(len(blending)):
+        for t in range(64):
+            if blending[k][t]>0.5:
+                Hei = k//480
+                Wid = k%480
+                print(t)
+                break
+        if Wid >0:
+            break
+    print("end")"""
+
+    
+    Wid = 412
+    Hei = 139
+
+    ind_num = Hei*480+ Wid
+
+    #print(depth_map_full.shape)
+    #temp = torch.argmax(depth_map_full)
+    temp_o = rays_o[ind_num]
+    temp_d = rays_d[ind_num]
+    #temp_z = depth_map_full[ind_num]
+    temp_z = new_z[ind_num][ind[ind_num]]
+
+
+    temp_val = temp_o + temp_z*temp_d
+    temp_val = torch.unsqueeze(temp_val,0)
+    temp_val = torch.unsqueeze(temp_val,0)
+    temp_val = torch.cat([temp_val, torch.ones_like(temp_val[..., 0:1]) * t], -1)
+
+
+    temp_view = viewdirs[ind_num]
+    temp_view = torch.unsqueeze(temp_view,0)
+    #temp_view = temp_d
+    #temp_view = torch.unsqueeze(temp_view,0)
+    
+
+    raw_s_new = network_query_fn_s(temp_val[...,:3],temp_view,network_fn_s)
+    raw_d_new = network_query_fn_d(temp_val,temp_view,network_fn_d)
+
+    blending_new = raw_d_new[...,10]
+
+    rgb_d = torch.sigmoid(raw_d_new[..., :3])  # [N_rays, N_samples, 3]
+    rgb_s = torch.sigmoid(raw_s_new[..., :3])  # [N_rays, N_samples, 3]
+    rgb_full = rgb_d*blending_new+rgb_s*(1-blending_new)
+    
+
+    #rgb_full 값 이용
+    print(rgb_full)
+    print(rgb_map_full[ind_num])
+    #여기까지
+
+
 
     t_interval = 1. / num_img * 2.
     pts_f = torch.cat([pts + sceneflow_f, torch.ones_like(pts[..., 0:1]) * (t + t_interval)], -1)
@@ -691,3 +1027,5 @@ def render_rays(t,
             import ipdb; ipdb.set_trace()
 
     return ret
+
+

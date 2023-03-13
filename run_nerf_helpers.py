@@ -230,9 +230,11 @@ def batchify(fn, chunk):
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
-
+    # torch.Size([129600, 64, 3]) -> torch.Size([8294400, 3])
+    # torch.Size([32768, 64, 3]) -> torch.Size([2097152, 3])
+    
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-
+    # input(f"{viewdirs.shape}")
     embedded = embed_fn(inputs_flat)
     if viewdirs is not None:
         input_dirs = viewdirs[:, None].expand(inputs[:, :, :3].shape)
@@ -368,6 +370,7 @@ def get_rays(H, W, focal, c2w):
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1) # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = c2w[:3, -1].expand(rays_d.shape)
+    
     return rays_o, rays_d
 
 
@@ -402,7 +405,7 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 
     rays_o = torch.stack([o0, o1, o2], -1)
     rays_d = torch.stack([d0, d1, d2], -1)
-
+    
     return rays_o, rays_d
 
 

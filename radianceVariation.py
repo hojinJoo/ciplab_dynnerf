@@ -5,7 +5,7 @@ import imageio
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
-from render_utils import *
+from render_utils_re import *
 from run_nerf_helpers import *
 from load_llff import *
 from utils.flow_utils import flow_to_image
@@ -41,9 +41,9 @@ def config_parser():
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=300000,
                         help='exponential learning rate decay')
-    parser.add_argument("--chunk", type=int, default=1024*128,
+    parser.add_argument("--chunk", type=int, default=65536,
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*128,
+    parser.add_argument("--netchunk", type=int, default=65536,
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_reload", action='store_true',
                         help='do not reload weights from saved ckpt')
@@ -166,7 +166,6 @@ def train():
                                                             frame2dolly=frame2dolly,
                                                             recenter=True, bd_factor=.9,
                                                             spherify=args.spherify)
-
         hwf = poses[0, :3, -1]
         poses = poses[:, :3, :4]
         num_img = float(poses.shape[0])
@@ -222,12 +221,12 @@ def train():
     }
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
+    
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
         print('RENDER ONLY')
         i = start - 1
-        
         # Change time and change view at the same time.
         time2render = np.concatenate((np.repeat((i_train / float(num_img) * 2. - 1.0), 4),
                                       np.repeat((i_train / float(num_img) * 2. - 1.0)[::-1][1:-1], 4)))
@@ -245,8 +244,15 @@ def train():
             basedir, expname, result_type + '_{:06d}'.format(i))
         os.makedirs(testsavedir, exist_ok=True)
         with torch.no_grad():
+            # make_maps를 이용
+            pose2render = torch.Tensor(poses[0:1, ...]).expand([int(num_img), 3, 4])
+            make_maps(pose2render, time2render,
+                              hwf, args.chunk, render_kwargs_test, savedir=testsavedir)
+            return
             ret = render_path(pose2render, time2render,
                               hwf, args.chunk, render_kwargs_test, savedir=testsavedir)
+            
+        
         moviebase = os.path.join(
             testsavedir, '{}_{}_{:06d}_'.format(expname, result_type, i))
         save_res(moviebase, ret)

@@ -4,6 +4,7 @@ import torch
 import imageio
 import numpy as np
 import torch.nn.functional as F
+from torchgeometry import angle_axis_to_rotation_matrix
 
 from run_nerf_helpers import *
 from utils.flow_utils import flow_to_image
@@ -330,45 +331,47 @@ def make_maps(render_poses,
             temp_z = new_z[ind_num][ind[ind_num]]
 
             temp_val = temp_o + temp_z*temp_d
+            
+            vo = -temp_d*temp_z
+            vo = torch.cat((vo,torch.tensor([1])),dim=0)
+            angles = np.linspace(-30,30,32)
+            new_view_dirs = []
+
+            for a in range(32):
+                for b in range(32):
+                    azimuth = np.radians(angles[b])
+                    elevation = np.radians(angles[32-a-1])
+                    
+                    
+                    r = angle_axis_to_rotation_matrix(torch.tensor([azimuth,elevation,0.0]).unsqueeze(0))
+
+                    vo = torch.tensor(vo,dtype=torch.float32)
+                    r = torch.tensor(r,dtype=torch.float32)
+                    temp_vo = torch.matmul(r,vo)
+                    temp_vo = temp_vo.squeeze(0)
+                    temp_vo = temp_vo[:3]
+                    
+                    
+                    temp_vo =torch.div(temp_vo,torch.norm(temp_vo))
+                    new_view_dirs.append(-temp_vo)
+            
+
+            #차원 추가
             temp_val = torch.unsqueeze(temp_val,0)
             temp_val = torch.unsqueeze(temp_val,0)
+            #시간축 추가
             temp_val = torch.cat([temp_val, torch.ones_like(temp_val[..., 0:1]) * t], -1)
             
             #rayd 에 수직인 평면에 돌리기
             
-            
-                
-                
-            
-            def get_views(view_dir) :
-                out_size = 32
-                
-                # view_x, view_y = torch.meshgrid(torch.linspace(-1, 1, out_size),torch.linspace(-1, 1, out_size))
+            print(temp_val)
+            print(temp_o)
 
-                # view_x = torch.reshape(view_x, [-1, 1])
-                # view_y = torch.reshape(view_y, [-1, 1])
-                # view_z = torch.ones_like(view_x)
-                # # view_z = torch.reshape(view_z, [-1, 1])
-                
-                view_x, view_y,view_z = torch.meshgrid(torch.linspace(-1, 1, out_size),torch.linspace(-1, 1, out_size),torch.linspace(-1, 1, out_size))
 
-                view_x = torch.reshape(view_x, [-1, 1])
-                view_y = torch.reshape(view_y, [-1, 1])
-                view_z = torch.reshape(view_z, [-1, 1])
 
-                viewdirs = torch.cat((view_z,view_y,view_x),dim=-1)
-                
-                viewdirs = torch.div(viewdirs, torch.norm(viewdirs, dim=-1, keepdim=True))
-                angle = torch.acos(torch.sum(view_dir*viewdirs, dim=-1, keepdim=True)).squeeze()
-                viewdirs = viewdirs[angle<=90/180*np.pi]
-                
-                
-                return viewdirs
             
-            new_view_dirs = get_views(viewdirs[ind_num])
-            
-            new_w,new_h = 128,128
-            
+
+        
             
             # new_view_dirs = get_all_view_dirs_to_temp_val_and_normalize(temp_val, out_size)
             # print(f"new view dirs {new_view_dirs.shape}")
@@ -376,7 +379,7 @@ def make_maps(render_poses,
             # # 배치화
             
             
-            
+            """
             def get_rgb_full(s,d,b) :
                 return (d*b + s*(1-b)).to(torch.device("cuda:1"))
             
@@ -400,39 +403,37 @@ def make_maps(render_poses,
             plt.imsave('out.png',rgb_full.cpu().numpy())
             
             return 
-            
-            # # 여기까지
-            # #여기부터
-            # color = torch.zeros((new_w*new_h,3))
-            # color_i = 0
-            # for d in new_view_dirs : 
-                
-            
-            
-            #     print(color_i)
-            
-            #     # below codes to multi-gpu
-            # # new_view_dirs = nn.DataParallel(new_view_dirs)
-            # # print(new_view_dirs.device_ids)
-            # # temp_val = nn.DataParallel(temp_val)
-            # # render_kwargs["network_query_fn_s"] = nn.DataParallel(render_kwargs["network_query_fn_s"])
-            # # render_kwargs["network_query_fn_d"] = nn.DataParallel(render_kwargs["network_query_fn_d"])
-            #     d = d.unsqueeze(0)
-            #     raw_s_new = render_kwargs["network_query_fn_s"](temp_val[...,:3],d,render_kwargs["network_fn_s"])
-            #     raw_d_new = render_kwargs["network_query_fn_d"](temp_val,d,render_kwargs["network_fn_d"])    
-            #     blending_new = raw_d_new[...,10]
-            #     rgb_d = torch.sigmoid(raw_d_new[..., :3])  # [N_rays, N_samples, 3]
-            #     rgb_s = torch.sigmoid(raw_s_new[..., :3])  # [N_rays, N_samples, 3]
+            """
+            new_w,new_h = 32,32
 
-            #     rgb_full = rgb_d*blending_new+rgb_s*(1-blending_new)
-            #     rgb_full = rgb_full.squeeze(0).squeeze(0)    
-            #     color[color_i] = rgb_full
-            #     color_i +=1
-            # import matplotlib.pyplot as plt
-            # color = color.reshape((new_w,new_h,3))
-            # plt.imsave('out.png',color.cpu().numpy())
+            color = torch.zeros((new_w*new_h,3))
+            color_i = 0
+            for d in new_view_dirs : 
+                
+                print(color_i)
             
-            # return 
+                # below codes to multi-gpu
+            # new_view_dirs = nn.DataParallel(new_view_dirs)
+            # print(new_view_dirs.device_ids)
+            # temp_val = nn.DataParallel(temp_val)
+            # render_kwargs["network_query_fn_s"] = nn.DataParallel(render_kwargs["network_query_fn_s"])
+            # render_kwargs["network_query_fn_d"] = nn.DataParallel(render_kwargs["network_query_fn_d"])
+                d = d.unsqueeze(0)
+                raw_s_new = render_kwargs["network_query_fn_s"](temp_val[...,:3],d,render_kwargs["network_fn_s"])
+                raw_d_new = render_kwargs["network_query_fn_d"](temp_val,d,render_kwargs["network_fn_d"])    
+                blending_new = raw_d_new[...,10]
+                rgb_d = torch.sigmoid(raw_d_new[..., :3])  # [N_rays, N_samples, 3]
+                rgb_s = torch.sigmoid(raw_s_new[..., :3])  # [N_rays, N_samples, 3]
+
+                rgb_full = rgb_d*blending_new+rgb_s*(1-blending_new)
+                rgb_full = rgb_full.squeeze(0).squeeze(0)    
+                color[color_i] = rgb_full
+                color_i +=1
+            import matplotlib.pyplot as plt
+            color = color.reshape((new_w,new_h,3))
+            plt.imsave('out.png',color.cpu().numpy())
+            
+            return 
         
         
             # # 여기까지
